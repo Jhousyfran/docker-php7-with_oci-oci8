@@ -1,53 +1,64 @@
-FROM php:8.0-fpm
+FROM php:7.4-fpm
 
 LABEL Jhousyfran Costa <jhousyfrancosta@gmail.com>
 
-ADD ./files /files_aux
+# install necessary packages
+RUN set -x \
+    && apt-get update \
+    && apt-get install libaio-dev mc unzip zlib1g-dev libmemcached-dev --no-install-recommends --no-install-suggests -y
 
-RUN export DEBIAN_FRONTEND=noninteractive && \
-apt-get update && \
-apt-get install software-properties-common -y && \
-add-apt-repository ppa:ondrej/php -y && \
-apt-get install -y tzdata && \
-ln -sf /usr/share/zoneinfo/America/Fortaleza /etc/localtime   && \
-dpkg-reconfigure --frontend noninteractive tzdata  && \
-apt-get update && \
-apt-get install -y php7.4 php7.4-xml php7.4-cli php7.4-common php7.4-json php7.4-opcache php7.4-readline libapache2-mod-php7.4 php-pear php7.4-dev php7.4-pgsql php7.4-mysql && \
-apt-get install -y php7.4-bcmath php7.4-calendar php7.4-cgi  php7.4-ctype  php7.4-dom php7.4-exif php7.4-fileinfo php7.4-ftp php7.4-gettext php7.4-iconv php7.4-imap php7.4-mbstring php7.4-mysqli  && \
-apt-get install -y php7.4-mysqlnd php7.4-pdo php7.4-pdo-mysql php7.4-pdo-pgsql php7.4-phar php7.4-posix php7.4-shmop php7.4-simplexml php7.4-sockets php7.4-sysvmsg php7.4-sysvsem php7.4-sysvshm && \
-apt-get install -y php7.4-tokenizer php7.4-xmlreader php7.4-xmlwriter php7.4-xsl php7.4-zip && \
-apt-get install -y php7.4-fpm  && \
-apt-get install -y libaio1  && \
-apt-get install -y alien && \
-alien -i /files_aux/oracle-instantclient11.2-basic-11.2.0.4.0-1.x86_64.rpm  && \
-alien -i /files_aux/oracle-instantclient11.2-sqlplus-11.2.0.4.0-1.x86_64.rpm  && \
-alien -i /files_aux/oracle-instantclient11.2-devel-11.2.0.4.0-1.x86_64.rpm  && \
-echo "/usr/lib/oracle/11.2/client64/lib" > /etc/ld.so.conf.d/oracle.conf  && \
-ldconfig  && \
-export ORACLE_HOME=/usr/lib/oracle/11.2/client64/   && \
-cd /files_aux/php-src-PHP-7.4.3/ext/oci8/  && \
-phpize  && \
-./configure --with-oci8=instantclient,/usr/lib/oracle/11.2/client64/lib  && \
-make install  && \
-echo "extension=oci8.so" > /etc/php/7.4/mods-available/oci8.ini   && \
-ln -s /etc/php/7.4/mods-available/oci8.ini /etc/php/7.4/apache2/conf.d/oci8.ini  && \
-ln -s /etc/php/7.4/mods-available/oci8.ini /etc/php/7.4/cli/conf.d/oci8.ini  && \
-cd /files_aux/php-src-PHP-7.4.3/ext/pdo_oci/  && \
-phpize  && \
-./configure --with-pdo-oci=instantclient,/usr/lib/oracle/11.2/client64/lib  && \
-make install  && \
-echo "extension=pdo_oci.so" > /etc/php/7.4/mods-available/pdo_oci.ini  && \
-ln -s /etc/php/7.4/mods-available/pdo_oci.ini /etc/php/7.4/apache2/conf.d/pdo_oci.ini && \
-ln -s /etc/php/7.4/mods-available/pdo_oci.ini /etc/php/7.4/cli/conf.d/pdo_oci.ini
 
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-RUN chmod -R 777 /var/www
+# Install Postgre PDO
+RUN apt-get install -y libpq-dev \
+    && docker-php-ext-configure pgsql -with-pgsql=/usr/local/pgsql \
+    && docker-php-ext-install pdo pdo_pgsql pgsql \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN rm -rf /files_aux
+# install oracle instant client
+ENV ORA_CLIENT=instantclient-basic-linux.x64-21.1.0.0.0.zip
+ENV ORA_CLIENT_SDK=instantclient-sdk-linux.x64-21.1.0.0.0.zip
+ENV ORA_URL_PART=https://download.oracle.com/otn_software/linux/instantclient/211000
+
+
+WORKDIR /opt
+
+RUN curl -O ${ORA_URL_PART}/${ORA_CLIENT} \
+    && curl -O ${ORA_URL_PART}/${ORA_CLIENT_SDK} \
+    && unzip /opt/${ORA_CLIENT} \
+    && unzip /opt/${ORA_CLIENT_SDK} \
+    && rm /opt/${ORA_CLIENT} && rm ${ORA_CLIENT_SDK}
+
+
+
+# install & enable xdebug
+RUN pecl install xdebug-3.0.2 && docker-php-ext-enable xdebug
+COPY xdebug.ini /usr/local/etc/php/conf.d/xdebug.ini
+
+# install & enable oci8
+RUN pecl install --onlyreqdeps --nobuild oci8-2.2.0 \
+    && cd "$(pecl config-get temp_dir)/oci8" \
+    && phpize \
+    && ./configure --with-oci8=instantclient,/opt/instantclient_21_1 \
+    && make && make install \
+    && docker-php-ext-enable oci8
+
+
+# install & enable pdo-oci
+RUN docker-php-ext-configure pdo_oci --with-pdo-oci=instantclient,/opt/instantclient_21_1,21.1 \
+    && docker-php-ext-install pdo_oci
+
+
+
+RUN mv "$PHP_INI_DIR/php.ini-development" "$PHP_INI_DIR/php.ini"
+
+# install composer
+RUN curl -sS https://getcomposer.org/installer | php -- \
+    --install-dir=/usr/local/bin \
+    --filename=composer
 
 WORKDIR /var/www
 
-EXPOSE 900
+EXPOSE 9000
 
-ENTRYPOINT [ "php-fpm" ]
-
+CMD ["php-fpm"]
